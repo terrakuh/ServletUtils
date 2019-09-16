@@ -2,16 +2,24 @@ package eu.terrakuh.servletutils.api;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import javax.servlet.AsyncContext;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.servlet.http.HttpSession;
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Parameter;
+import java.net.URI;
+import java.net.URL;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Logger;
 
 public abstract class API
@@ -60,7 +68,7 @@ public abstract class API
 		throw new ConversionException("Unknown target type.");
 	}
 
-	private Object[] getParameterValues(HttpServletRequest request, HttpServletResponse response, Method method) throws Exception
+	private Object[] getParameterValues(HttpSession session, HttpServletRequest request, HttpServletResponse response, Method method) throws Exception
 	{
 		Object[] parameters = new Object[method.getParameterCount()];
 		int index = 0;
@@ -79,8 +87,10 @@ public abstract class API
 					parameters[index++] = request;
 				} else if (HttpSession.class.isAssignableFrom(parameterClass)) {
 					parameters[index++] = request.getSession();
+				} else if (getClass().isAssignableFrom(parameterClass)) {
+					parameters[index++] = this;
 				} else {
-					throw new Exception("");
+					parameters[index++] = getInstance(parameterClass, session, false);
 				}
 			} else {
 				String value = request.getParameter(apiParameter.value());
@@ -107,59 +117,116 @@ public abstract class API
 		return Optional.ofNullable((Integer) session.getAttribute(String.format("%s/:accessLevel", getClass().getName()))).orElse(-1);
 	}
 
-	public final void execute(String apiClass, String apiMethod, HttpServletRequest request, HttpServletResponse response) throws Exception
+	private Lock getLock(HttpSession session, String lockName)
 	{
-		LOGGER.info(String.format("Execute '%s' from '%s'.", apiMethod, apiClass));
-
-		Class<?> klass = apiClasses.get(apiClass);
-
-		// No api class available
-		if (klass == null) {
-			throw new APIAccessException("Class not found.");
+		if (lockName.isEmpty()) {
+			return null;
 		}
 
-		HttpSession session = request.getSession();
-		int accessLevel = getAccessLevel(session);
+		String name = String.format("%s/:lock/%s", getClass().getName(), lockName);
+		Lock lock = (Lock) session.getAttribute(name);
 
-		LOGGER.info(String.format("Access level at: %d", accessLevel));
+		if (lock == null) {
+			session.setAttribute(name, lock = new ReentrantLock());
+		}
 
-		// Search for the api method
-		for (Method method : klass.getMethods()) {
-			if (method.getName().equals(apiMethod)) {
-				// Check method and access level
-				APIMethod annotation = method.getAnnotation(APIMethod.class);
+		return lock;
+	}
 
-				// Not allowed
-				if (annotation == null) {
-					throw new APIAccessException("Api method not available.");
-				} else if (annotation.accessLevel() > accessLevel) {
-					throw new APIAccessException("Access denied.");
-				}
+	private Object getInstance(Class<?> klass, HttpSession session, boolean createIfNotExists) throws NoSuchMethodException, IllegalAccessException, InvocationTargetException, InstantiationException
+	{
+		String name = String.format("%s/%s", getClass().getName(), klass.getName());
+		Object instance = klass.cast(session.getAttribute(name));
 
-				Object[] parameters = getParameterValues(request, response, method);
-				Object instance = null;
+		// Create
+		if (instance == null && createIfNotExists) {
+			instance = klass.getDeclaredConstructor().newInstance();
 
-				// Get object
-				if (!Modifier.isStatic(method.getModifiers())) {
-					String name = String.format("%s/%s", getClass().getName(), apiClass);
+			session.setAttribute(name, instance);
+		}
 
-					instance = klass.cast(session.getAttribute(name));
+		return instance;
+	}
 
-					// Create
-					if (instance == null) {
-						instance = klass.newInstance();
+	public final void execute(String apiClass, String apiMethod, HttpServletRequest request, HttpServletResponse response) throws IOException
+	{
+		try {
+			LOGGER.info(String.format("Execute '%s' from '%s'.", apiMethod, apiClass));
 
-						session.setAttribute(name, instance);
-					}
-				}
+			Class<?> klass = apiClasses.get(apiClass);
 
-				// Invoke and send result
-				OBJECT_MAPPER.writeValue(response.getWriter(), method.invoke(instance, parameters));
-
-				return;
+			// No api class available
+			if (klass == null) {
+				throw new APIAccessException("Class not found.");
 			}
-		}
 
-		throw new APIAccessException("Method not found.");
+			HttpSession session = request.getSession();
+			int accessLevel = getAccessLevel(session);
+
+			LOGGER.info(String.format("Access level at: %d", accessLevel));
+
+			// Search for the api method
+			for (Method method : klass.getMethods()) {
+				if (method.getName().equals(apiMethod)) {
+					// Check method and access level
+					APIMethod annotation = method.getAnnotation(APIMethod.class);
+
+					// Not allowed
+					if (annotation == null) {
+						throw new APIAccessException("Api method not available.");
+					} else if (annotation.accessLevel() > accessLevel) {
+						throw new APIAccessException("Access denied.");
+					}
+
+					Object[] parameters = getParameterValues(session, request, response, method);
+					Object instance = getInstance(klass, session, !Modifier.isStatic(method.getModifiers()));
+
+					// Create task
+					Runnable task = () -> {
+						try {
+							Lock lock = getLock(session, annotation.lockingGroup());
+
+							if (lock != null && !lock.tryLock()) {
+								throw new APIAsyncException("Async task already running.");
+							}
+
+							Object result;
+
+							try {
+								result = method.invoke(instance, parameters);
+							} finally {
+								if (lock != null) {
+									lock.unlock();
+								}
+							}
+
+							OBJECT_MAPPER.writeValue(response.getWriter(), result);
+						} catch (Exception e) {
+							try {
+								sendError(response, e);
+							} catch (IOException ex) {
+								ex.printStackTrace();
+							}
+						}
+					};
+
+					// Async operation
+					if (annotation.async()) {
+						AsyncContext context = request.startAsync(request, response);
+
+						context.setTimeout(0);
+						context.start(task);
+					} else {
+						task.run();
+					}
+
+					return;
+				}
+			}
+
+			throw new APIAccessException("Method not found.");
+		} catch (Exception e) {
+			sendError(response, e);
+		}
 	}
 }
