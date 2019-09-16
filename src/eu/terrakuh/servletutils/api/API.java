@@ -33,10 +33,25 @@ public abstract class API
 	protected Object convert(String value, Class<?> target) throws ConversionException
 	{
 		try {
-			if (target.isAssignableFrom(String.class)) {
+			if (target.isArray()) {
+				String[] values = OBJECT_MAPPER.readValue(value, String[].class);
+				Object[] array = new Object[values.length];
+
+				for (int i = 0; i < values.length; ++i) {
+					array[i] = convert(values[i], target.getComponentType());
+				}
+
+				return array;
+			} else if (target.isAssignableFrom(String.class)) {
 				return value;
 			} else if (target.isAssignableFrom(Integer.class)) {
 				return Integer.parseInt(value);
+			} else if (target.isAssignableFrom(URI.class)) {
+				return URI.create(value);
+			} else if (target.isAssignableFrom(URL.class)) {
+				return new URL(value);
+			} else if (target.isAssignableFrom(Path.class)) {
+				return Paths.get(value);
 			}
 		} catch (Exception e) {
 			throw new ConversionException(e);
