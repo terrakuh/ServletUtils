@@ -11,5 +11,10 @@ public @interface APIMethod
 	 * @return the minimum required access level to execute this function
 	 */
 	int accessLevel();
+
 	String method() default "GET";
+
+	boolean async() default false;
+
+	String lockingGroup() default "";
 }
