@@ -2,10 +2,12 @@ package eu.terrakuh.servletutils.api;
 
 import javax.servlet.ServletConfig;
 import javax.servlet.ServletException;
+import javax.servlet.annotation.WebServlet;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -26,8 +28,8 @@ public class APIServlet extends HttpServlet
 				throw new ServletException("Specified class is not an API class.");
 			}
 
-			api = (API) klass.newInstance();
-		} catch (ClassNotFoundException | InstantiationException | IllegalAccessException e) {
+			api = (API) klass.getDeclaredConstructor().newInstance();
+		} catch (ClassNotFoundException | InstantiationException | IllegalAccessException | NoSuchMethodException | InvocationTargetException e) {
 			throw new ServletException(e);
 		}
 
@@ -39,16 +41,12 @@ public class APIServlet extends HttpServlet
 	{
 		LOGGER.info(String.format("Processing request to '%s'.", req.getRequestURI()));
 
-		try {
-			Matcher matcher = PATTERN.matcher(req.getRequestURI());
+		Matcher matcher = PATTERN.matcher(req.getRequestURI());
 
-			if (!matcher.find()) {
-				throw new ServletException("Malformed request.");
-			}
-
+		if (!matcher.find()) {
+			api.sendError(resp, new ServletException("Malformed request."));
+		} else {
 			api.execute(matcher.group(1), matcher.group(2), req, resp);
-		} catch (Exception e) {
-			api.sendError(resp, e);
 		}
 	}
 }
