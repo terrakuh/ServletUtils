@@ -7,10 +7,7 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.servlet.http.HttpSession;
 import java.io.IOException;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
-import java.lang.reflect.Parameter;
+import java.lang.reflect.*;
 import java.net.URI;
 import java.net.URL;
 import java.nio.file.Path;
@@ -42,11 +39,13 @@ public abstract class API
 	{
 		try {
 			if (target.isArray()) {
+				target = target.getComponentType();
+
 				String[] values = OBJECT_MAPPER.readValue(value, String[].class);
-				Object[] array = new Object[values.length];
+				Object array = Array.newInstance(target, values.length);
 
 				for (int i = 0; i < values.length; ++i) {
-					array[i] = convert(values[i], target.getComponentType());
+					Array.set(array, i, convert(values[i], target));
 				}
 
 				return array;
